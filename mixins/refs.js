@@ -5,6 +5,7 @@ module.exports = function (repo) {
   repo.resolve = resolve;       // (hash-ish) -> hash
   repo.updateHead = updateHead; // (hash)
   repo.getHead = getHead;       // () -> ref
+  repo.getDetachedHead = getDetachedHead; // () -> (hash)
   repo.setHead = setHead;       // (ref)
   repo.readRef = readRef;       // (ref) -> hash
   repo.createRef = createRef;   // (ref, hash)
@@ -89,6 +90,21 @@ function getHead(callback) {
     return callback(null, match[1]);
   }
 }
+
+function getDetachedHead(callback) {
+  if (!callback) return getDetachedHead.bind(this);
+  var repo = this, db = repo.db;
+  return db.get("HEAD", onReadDetached);
+
+  function onReadDetached(err, ref) {
+    if (err) return callback(err);
+    if (!ref) return callback();
+    var match = ref.match(/^ref: *(.*)/);
+    if (match) return callback(new Error("Not detached HEAD"));
+    return callback(null, ref);
+  }
+}
+
 
 function setHead(branchName, callback) {
   if (!callback) return setHead.bind(this, branchName);
