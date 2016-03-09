@@ -1,219 +1,265 @@
-js-git
-======
+# JS-Git
+[![Gitter](https://badges.gitter.im/Join Chat.svg)](https://gitter.im/creationix/js-git?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
-Git Implemented in JavaScript.
+This project is a collection of modules that helps in implementing git powered
+applications in JavaScript.  The original purpose for this is to enable better
+developer tools for authoring code in restricted environments like ChromeBooks
+and tablets.  It also enables using git as a database to replace SQL and no-SQL
+data stores in many applications.
 
-This project is very modular and configurable by gluing different components together.
+This project was initially funded by two crowd-sourced fundraisers.  See details
+in [BACKERS.md](BACKERS.md) and [BACKERS-2.md](BACKERS-2.md).  Thanks to all of
+you who made this possible!
 
-This repo, `js-git`, is the core implementation of git and consumes various instances of interfaces.  This means that your network and persistance stack is completely pluggable.
+## Usage
 
-If you're looking for a more pre-packaged system, consider packages like `creationix/git-node` that implement all the abstract interfaces using node.js native APIs.  The `creationix/jsgit` package is an example of a CLI tool that consumes this.
+Detailed API docs are contained in the [doc](doc) subfolder of this repository.
 
-The main end-user API as exported by this module for working with local repositories is:
+In general the way you use js-git is you create a JS object and then mixin the
+functionality you need.  Here is an example of creating an in-memory database,
+creating some objects, and then walking that tree using the high-level walker
+APIs.
 
-## Initialize the library
-
-First you create an instance of the library by injecting the platform dependencies.
+## Creating a repo object.
 
 ```js
-var platform = require('git-node-platform');
-var jsGit = require('js-git')(platform);
+// This provides symbolic names for the octal modes used by git trees.
+var modes = require('js-git/lib/modes');
+
+// Create a repo by creating a plain object.
+var repo = {};
+
+// This provides an in-memory storage backend that provides the following APIs:
+// - saveAs(type, value) => hash
+// - loadAs(type, hash) => hash
+// - saveRaw(hash, binary) =>
+// - loadRaw(hash) => binary
+require('js-git/mixins/mem-db')(repo);
+
+// This adds a high-level API for creating multiple git objects by path.
+// - createTree(entries) => hash
+require('js-git/mixins/create-tree')(repo);
+
+// This provides extra methods for dealing with packfile streams.
+// It depends on
+// - unpack(packStream, opts) => hashes
+// - pack(hashes, opts) => packStream
+require('js-git/mixins/pack-ops')(repo);
+
+// This adds in walker algorithms for quickly walking history or a tree.
+// - logWalk(ref|hash) => stream<commit>
+// - treeWalk(hash) => stream<object>
+require('js-git/mixins/walkers')(repo);
+
+// This combines parallel requests for the same resource for effeciency under load.
+require('js-git/mixins/read-combiner')(repo);
+
+// This makes the object interface less strict.  See it's docs for details
+require('js-git/mixins/formats')(repo);
 ```
 
-## Wrap a Database
+## Generators vs Callbacks
 
-Then you implement the database interface (or more likely use a library to create it for you).
+There are two control-flow styles that you can use to consume js-git APIs.  All
+the examples here use `yield` style and assume the code is contained within a
+generator function that's yielding to a tool like [gen-run](https://github.com/creationix/gen-run).
+
+This style requires ES6 generators.  This feature is currently in stable Firefox,
+in stable Chrome behind a user-configurable flag, in node.js 0.11.x or greater
+with a command-line flag.
+
+Also you can use generators on any ES5 platform if you use a source transform
+like Facebook's [regenerator](http://facebook.github.io/regenerator/) tool.
+
+You read more about how generators work at [Generators vs Fibers](http://howtonode.org/generators-vs-fibers).
 
 ```js
-var fsDb = require('git-fs-db')(platform);
-var db = fsDb("/path/to/repo.git");
+var run = require('gen-run');
+
+run(function*() {
+ // Blocking logic goes here.  You can use yield
+ var result = yield someAction(withArgs);
+ // The generator pauses at yield and resumes when the data is available.
+ // The rest of your process is not blocked, just this generator body.
+ // If there was an error, it will throw into this generator.
+});
 ```
 
-The database interface is documented later on.
-
-## Continuables
-
-In all public async functions you can either pass in a node-style callback last or omit the callback and it will return you a continuable.
-
-This means you can consume the js-git library using normal ES3 code or if you prefer use [gen-run][] and consume the continuables.
-
-If the callback is omitted, a continuable is returned.  You must pass a callback into this continuable to actually start the action.
+If you can't use this new feature or just plain prefer node-style callbacks, all
+js-git APIs also support that.  The way this works is actually quite simple.
+If you don't pass in the callback, the function will return a partially applied
+version of your call expecting just the callback.
 
 ```js
-// Callback mode
-jsgit.someAction(arg1, arg2, function (err, result) {
-  ...
+someAction(withArgs, function (err, value) {
+  if (err) return handleMyError(err);
+  // do something with value
 });
 
-// Continuable mode
-var cont = jsgit.someAction(arg1, arg2);
-cont(function (err, result) {
-  ...
-});
-
-// Continuable mode with gen-run
-var result = yield jsgit.someAction(arg1, arg2);
-```
-
-### db.get(key, [callback]) -> value
-
-Load a ref or object from the database.
-
-The database should assume that keys that are 40-character long hex strings are sha1 hashes.  The value for these will always be binary (`Buffer` in node, `Uint8Array` in browser)
-All other keys are paths like `refs/heads/master` or `HEAD` and the value is a string.
-
-
-### db.set(key, value, [callback])
-
-Save a value to the database.  Same rules apply about hash keys being binary values and other keys being string values.
-
-### db.has(key, [callback]) -> hasKey?
-
-Check if a key is in the database
-
-### db.del(key, [callback])
-
-Remove an object or ref from the database.
-
-### db.keys(prefix, [callback]) -> keys
-
-Given a path prefix, give all the keys.  This is like a readdir if you treat the keys as paths.
-
-For example, given the keys `refs/heads/master`, `refs/heads/experimental`, `refs/tags/0.1.3` and the prefix `refs/heads/`, the output would be `master` and `experimental`.
-
-A null prefix returns all non hash keys.
-
-### db.init([callback])
-
-Initialize a database.  This is where you db implementation can setup stuff.
-
-### db.clear([callback])
-
-This is for when the user wants to delete or otherwise reclaim your database's resources.
-
-
-### Wrapping the DataBase
-
-Now that you have a database instance, you can use the jsGit library created above.
-
-```js
-var repo = jsGit(db);
-```
-
-### repo.load(hash(ish), [callback]) -> git object
-
-Load a git object from the database.  You can pass in either a hash or a symbolic name like `HEAD` or `refs/tags/v3.1.4`.
-
-The object will be of the form:
-
-```js
-{
-  type: "commit", // Or "tag", "tree", or "blob"
-  body: { ... } // Or an array for tree and a binary value for blob.
+// The function would be implemented to support both style like this.
+function someAction(arg, callback) {
+  if (!callback) return someAction.bind(this, arg);
+  // We now have callback and arg
 }
 ```
 
-### repo.save(object, [callback]) -> hash
+## Basic Object Creation
 
-Save an object to the database.  This will give you back the hash of the cotent by which you can retrieve the value back.
+Now we have an in-memory git repo useful for testing the network operations or
+just getting to know the available APIs.
 
-### repo.loadAs(type, hash, [callback]) -> body
-
-This convenience wrapper will call `repo.load` for you and then check if the type is what you expected.  If it is, it will return the body directly.  If it's not, it will error.
+In this example, we'll create a blob, create a tree containing that blob, create
+a commit containing that tree.  This shows how to create git objects manually.
 
 ```js
-var commit = yield repo.loadAs("commit", "HEAD");
-var tree = yield repo.loadAs("tree", commit.tree);
+  // First we create a blob from a string.  The `formats` mixin allows us to
+  // use a string directly instead of having to pass in a binary buffer.
+  var blobHash = yield repo.saveAs("blob", "Hello World\n");
+
+  // Now we create a tree that is a folder containing the blob as `greeting.txt`
+  var treeHash = yield repo.saveAs("tree", {
+    "greeting.txt": { mode: modes.file, hash: blobHash }
+  });
+
+  // With that tree, we can create a commit.
+  // Again the `formats` mixin allows us to omit details like committer, date,
+  // and parents.  It assumes sane defaults for these.
+  var commitHash = yield repo.saveAs("commit", {
+    author: {
+      name: "Tim Caswell",
+      email: "tim@creationix.com"
+    },
+    tree: treeHash,
+    message: "Test commit\n"
+  });
+
 ```
 
-I'm using yield syntax because it's simpler, you can use callbacks instead if you prefer.
+## Basic Object Loading
 
-### repo.saveAs(type, body, [callback]) -> hash
-
-Another convenience wrapper, this time to save objects as a specefic type.  The body must be in the right format.
+We can read objects back one at a time using `loadAs`.
 
 ```js
-var blobHash = yield repo.saveAs("blob", binaryData);
-var treeHash = yield repo.saveAs("tree", [
-  { mode: 0100644, name: "file.dat", hash: blobHash }
-]);
-var commitHash = yield repo.saveAs("commit", {
-  tree: treeHash,
-  author: { name: "Tim Caswell", email: "tim@creationix.com", date: new Date },
-  message: "Save the blob"
+// Reading the file "greeting.txt" from a commit.
+
+// We first read the commit.
+var commit = yield repo.loadAs("commit", commitHash);
+// We then read the tree using `commit.tree`.
+var tree = yield repo.loadAs("tree", commit.tree);
+// We then read the file using the entry hash in the tree.
+var file = yield repo.loadAs("blob", tree["greeting.txt"].hash);
+// file is now a binary buffer.
+```
+
+When using the `formats` mixin there are two new types for `loadAs`, they are
+`"text"` and `"array"`.
+
+```js
+// When you're sure the file contains unicode text, you can load it as text directly.
+var fileAsText = yield repo.loadAs("text", blobHash);
+
+// Also if you prefer array format, you can load a directory as an array.
+var entries = yield repo.loadAs("array", treeHash);
+entries.forEach(function (entry) {
+  // entry contains {name, mode, hash}
 });
 ```
 
-### repo.remove(hash, [callback])
+## Using Walkers
 
-Remove an object.
+Now that we have a repo with some minimal data in it, we can query it.  Since we
+included the `walkers` mixin, we can walk the history as a linear stream or walk
+the file tree as a depth-first linear stream.
 
-### repo.unpack(packFileStream, opts, [callback])
+```js
+// Create a log stream starting at the commit we just made.
+// You could also use symbolic refs like `refs/heads/master` for repos that
+// support them.
+var logStream = yield repo.logWalk(commitHash);
 
-Import a packfile stream (simple-stream format) into the current database.  This is used mostly for clone and fetch operations where the stream comes from a remote repo.
+// Looping through the stream is easy by repeatedly calling waiting on `read`.
+var commit, object;
+while (commit = yield logStream.read(), commit !== undefined) {
 
-`opts` is a hash of optional configs.
+  console.log(commit);
 
- - `opts.onProgress(progress)` - listen to the git progress channel by passing in a event listener.
- - `opts.onError(error)` - same thing, but for the error channel.
- - `opts.deline` - If this is truthy, the progress and error messages will be rechunked to be whole lines.  They usually come jumbled in the internal sidechannel.
+  // We can also loop through all the files of each commit version.
+  var treeStream = yield repo.treeWalk(commit.tree);
+  while (object = yield treeStream.read(), object !== undefined) {
+    console.log(object);
+  }
 
-### repo.logWalk(hash(ish), [callback]) -> log stream
+}
+```
 
-This convenience wrapper creates a readable stream of the history sorted by author date.
+## Filesystem Style Interface
 
-If you want full history, pass in `HEAD` for the hash.
+If you feel that creating a blob, then creating a tree, then creating the parent
+tree, etc is a lot of work to save just one file, I agree.  While writing the
+tedit app, I discovered a nice high-level abstraction that you can mixin to make
+this much easier.  This is the `create-tree` mixin referenced in the above
+config.
 
-### repo.treeWalk(hash(ish), [callback]) -> file stream
+```js
+// We wish to create a tree that contains `www/index.html` and `README.me` files.
+// This will create these two blobs, create a tree for `www` and then create a
+// tree for the root containing `README.md` and the newly created `www` tree.
+var treeHash = yield repo.createTree({
+  "www/index.html": {
+    mode: modes.file,
+    content: "<h1>Hello</h1>\n<p>This is an HTML page?</p>\n"
+  },
+  "README.md": {
+    mode: modes.file,
+    content: "# Sample repo\n\nThis is a sample\n"
+  }
+});
+```
 
-This helper will return a stream of files suitable for traversing a file tree as a linear stream.  The hash can be a ref to a commit, a commit hash or a tree hash directly.
+This is great for creating several files at once, but it can also be used to
+edit existing trees by adding new files, changing existing files, or deleting
+existing entries.
 
-### repo.walk(seed, scan, loadKey, compare) -> stream
+```js
+var changes = [
+  {
+    path: "www/index.html" // Leaving out mode means to delete the entry.
+  },
+  {
+    path: "www/app.js", // Create a new file in the existing directory.
+    mode: modes.file,
+    content: "// this is a js file\n"
+  }
+];
 
-This is the generic helper that `logWalk` and `treeWalk` use.  See `js-git.js` source for usage.
+// We need to use array form and specify the base tree hash as `base`.
+changes.base = treeHash;
 
-### repo.resolveHashish(hashish, [callback]) -> hash
+treeHash = yield repo.createTree(changes);
+```
 
-Resolve a ref, branch, or tag to a real hash.
+## Creating Composite Filesystems
 
-### repo.updateHead(hash, [callback])
+The real fun begins when you create composite filesystems using git submodules.
 
-Update whatever branch `HEAD` is pointing to so that it points to `hash`.
+The code that handles this is not packaged as a repo mixin since it spans several
+independent repos.  Instead look to the [git-tree](https://github.com/creationix/git-tree)
+repo for the code.  It's interface is still slightly unstable and undocumented
+but is used in production by tedit and my node hosting service that complements tedit.
 
-You'll usually want to do this after creating a new commint in the HEAD branch.
+Basically this module allows you to perform high-level filesystem style commands
+on a virtual filesystem that consists of many js-git repos.  Until there are
+proper docs, you can see how tedit uses it at <https://github.com/creationix/tedit-app/blob/master/src/data/fs.js#L11-L21>.
 
-### repo.getHead([callback]) -> ref name
+## Mounting Github Repos
 
-Read the current active branch.
+I've been asking Github to enable CORS headers to their HTTPS git servers, but
+they've refused to do it.  This means that a browser can never clone from github
+because the browser will disallow XHR requests to the domain.
 
-### repo.setHead(ref, [callback])
+They do, however, offer a REST interface to the raw [git data](https://developer.github.com/v3/git/).
 
-Set the current active branch.
+Using this I wrote a mixin for js-git that uses github *as* the backend store.
 
-### repo.fetch(remote, opts, [callback])
-
-Convenience wrapper that fetches from a remote instance and calls `repo.unpack` with the resulting packfile stream for you.
-
-## Related Packages
-
-Being that js-git is so modular, here is a list of the most relevent modules that work with js-git:
-
- - <https://github.com/creationix/git-net> - A generic remote protocol implementation that wraps the platform interfaces and consumes urls.
- - Example Applications
-   - <https://github.com/creationix/git-browser> - A multi-platform GUI program that clones and browses git repos.
-   - <https://github.com/creationix/jsgit> - An example of using js-git in node.  This is a CLI tool.
-     - <https://github.com/creationix/git-node> - A packaged version of js-git made for node.js
- - Platform Helpers
-   - <https://github.com/creationix/git-http> - A git-http platform interface adapter that wraps git-tcp platform instances.
-   - <https://github.com/creationix/git-node-platform> - Just the platform interface for using js-git on node.js.
-   - <https://github.com/creationix/git-sha1> - A pure-js implementation of the sha1 part of the platform interface.
-   - <https://github.com/creationix/git-web-platform> - An implementation of js-git platform for browsers.
-   - <https://github.com/creationix/websocket-tcp-client> - An implementation of the git-tcp interface that consumes a websocket to tcp proxy server.
-   - <https://github.com/creationix/git-zlib> - A pure-js implementation of the zlib parts of the platform interface.
- - Storage Backends
-   - <https://github.com/creationix/git-fs-db> - A database interface adapter that wraps a fs interface.
-   - <https://github.com/creationix/git-localdb> - A git-db implementation based on `localStorage`.
-   - <https://github.com/creationix/git-memdb> - A git-db implementation that stores data in ram for quick testing.
-   - <https://github.com/aaronpowell/git-indexeddb> - A git-db implementation cased on `indexedDB`.
-
-[gen-run]: https://github.com/creationix/gen-run
+Code at <https://github.com/creationix/js-github>. Usage in tedit can be seen at
+<https://github.com/creationix/tedit-app/blob/master/src/data/fs.js#L31>.
